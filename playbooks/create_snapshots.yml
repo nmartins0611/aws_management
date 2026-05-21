@@ -65,7 +65,7 @@
           Snapshot of {{ item.volume_id }} from {{ item.instance_name }}
           ({{ item.device_name }}) - batch {{ snapshot_batch }}
         snapshot_tags:
-          Name: "{{ item.instance_name }}-{{ item.device_name }}-{{ snapshot_batch }}"
+          Name: "nm-{{ item.instance_name }}-{{ item.device_name }}-{{ snapshot_batch }}"
           SourceInstanceId: "{{ item.instance_id }}"
           SourceVolumeId: "{{ item.volume_id }}"
           SourceDeviceName: "{{ item.device_name }}"

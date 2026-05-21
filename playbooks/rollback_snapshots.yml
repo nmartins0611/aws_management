@@ -186,7 +186,7 @@
         throughput: "{{ item.throughput if item.throughput | int > 0 else omit }}"
         zone: "{{ item.availability_zone }}"
         tags:
-          Name: "{{ item.instance_name }}-{{ item.device_name }}-restored"
+          Name: "nm-{{ item.instance_name }}-{{ item.device_name }}-restored"
           RestoredFromSnapshot: "{{ item.snapshot_id }}"
           OriginalVolumeId: "{{ item.old_volume_id }}"
       loop: "{{ rollback_plan_enriched }}"
