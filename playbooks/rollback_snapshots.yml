@@ -1,0 +1,226 @@
+---
+- name: Rollback EC2 instances to EBS snapshots
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    aws_region: eu-west-2
+
+  pre_tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - tag_name is defined
+          - tag_value is defined
+        fail_msg: "Required extra vars: -e tag_name=<TagKey> -e tag_value=<TagValue>"
+
+  tasks:
+    - name: Gather instances matching tag {{ tag_name }}={{ tag_value }}
+      amazon.aws.ec2_instance_info:
+        region: "{{ aws_region }}"
+        filters:
+          "tag:{{ tag_name }}": "{{ tag_value }}"
+          instance-state-name:
+            - running
+            - stopped
+      register: ec2_info
+
+    - name: Report when no instances found
+      ansible.builtin.debug:
+        msg: "No instances found with tag {{ tag_name }}={{ tag_value }}"
+      when: ec2_info.instances | length == 0
+
+    - name: End play when no instances found
+      ansible.builtin.meta: end_play
+      when: ec2_info.instances | length == 0
+
+    - name: Build volume metadata for rollback
+      ansible.builtin.set_fact:
+        rollback_volumes: >-
+          [{% for instance in ec2_info.instances %}
+            {% for vol in instance.block_device_mappings %}
+              {
+                "instance_id": "{{ instance.instance_id }}",
+                "volume_id": "{{ vol.ebs.volume_id }}",
+                "device_name": "{{ vol.device_name }}",
+                "availability_zone": "{{ instance.placement.availability_zone }}",
+                "instance_name": "{{ instance.tags.Name | default(instance.instance_id) }}"
+              }{% if not loop.last %},{% endif %}
+            {% endfor %}{% if not loop.last %},{% endif %}
+          {% endfor %}]
+
+    # ------------------------------------------------------------------
+    # Find the matching snapshot for each volume.
+    # When snapshot_batch is provided, match that exact batch.
+    # Otherwise, pick the most recent snapshot per volume.
+    # ------------------------------------------------------------------
+    - name: Find snapshots for each volume
+      amazon.aws.ec2_snapshot_info:
+        region: "{{ aws_region }}"
+        filters: "{{ _filters }}"
+      vars:
+        _base_filters:
+          "tag:SourceVolumeId": "{{ item.volume_id }}"
+          status: completed
+        _batch_filter:
+          "tag:SnapshotBatch": "{{ snapshot_batch }}"
+        _filters: "{{ _base_filters | combine(_batch_filter) if snapshot_batch is defined else _base_filters }}"
+      loop: "{{ rollback_volumes }}"
+      loop_control:
+        label: "{{ item.instance_id }}:{{ item.device_name }}"
+      register: snapshot_lookups
+
+    - name: Build rollback plan
+      ansible.builtin.set_fact:
+        rollback_plan: >-
+          [{% for lookup in snapshot_lookups.results %}
+            {% set sorted_snaps = lookup.snapshots | sort(attribute='start_time', reverse=true) %}
+            {% if sorted_snaps | length > 0 %}
+              {
+                "instance_id": "{{ lookup.item.instance_id }}",
+                "instance_name": "{{ lookup.item.instance_name }}",
+                "old_volume_id": "{{ lookup.item.volume_id }}",
+                "device_name": "{{ lookup.item.device_name }}",
+                "availability_zone": "{{ lookup.item.availability_zone }}",
+                "snapshot_id": "{{ sorted_snaps[0].snapshot_id }}",
+                "snapshot_time": "{{ sorted_snaps[0].start_time }}"
+              }{% if not loop.last %},{% endif %}
+            {% endif %}
+          {% endfor %}]
+
+    - name: Report when no snapshots found
+      ansible.builtin.debug:
+        msg: "No matching snapshots found for any volumes. Nothing to rollback."
+      when: rollback_plan | length == 0
+
+    - name: End play when no snapshots available
+      ansible.builtin.meta: end_play
+      when: rollback_plan | length == 0
+
+    - name: Display rollback plan
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.instance_name }} ({{ item.instance_id }})
+          {{ item.device_name }}: {{ item.old_volume_id }}
+          -> snapshot {{ item.snapshot_id }} ({{ item.snapshot_time }})
+      loop: "{{ rollback_plan }}"
+      loop_control:
+        label: "{{ item.instance_id }}:{{ item.device_name }}"
+
+    # ------------------------------------------------------------------
+    # Get volume details so we can match type, size, and encryption
+    # ------------------------------------------------------------------
+    - name: Get original volume details
+      amazon.aws.ec2_vol_info:
+        region: "{{ aws_region }}"
+        filters:
+          volume-id: "{{ item.old_volume_id }}"
+      loop: "{{ rollback_plan }}"
+      loop_control:
+        label: "{{ item.old_volume_id }}"
+      register: vol_details
+
+    - name: Enrich rollback plan with volume specs
+      ansible.builtin.set_fact:
+        rollback_plan_enriched: >-
+          [{% for idx in range(rollback_plan | length) %}
+            {% set plan_item = rollback_plan[idx] %}
+            {% set vol = vol_details.results[idx].volumes[0] %}
+            {
+              "instance_id": "{{ plan_item.instance_id }}",
+              "instance_name": "{{ plan_item.instance_name }}",
+              "old_volume_id": "{{ plan_item.old_volume_id }}",
+              "device_name": "{{ plan_item.device_name }}",
+              "availability_zone": "{{ plan_item.availability_zone }}",
+              "snapshot_id": "{{ plan_item.snapshot_id }}",
+              "volume_type": "{{ vol.type }}",
+              "volume_size": {{ vol.size }},
+              "encrypted": {{ vol.encrypted | lower }},
+              "iops": {{ vol.iops | default(0) }},
+              "throughput": {{ vol.throughput | default(0) }}
+            }{% if not loop.last %},{% endif %}
+          {% endfor %}]
+
+    # ------------------------------------------------------------------
+    # Collect unique instance IDs that need to be stopped
+    # ------------------------------------------------------------------
+    - name: Identify instances to stop
+      ansible.builtin.set_fact:
+        instances_to_stop: "{{ rollback_plan_enriched | map(attribute='instance_id') | unique | list }}"
+
+    - name: Get current state of target instances
+      amazon.aws.ec2_instance_info:
+        region: "{{ aws_region }}"
+        instance_ids: "{{ instances_to_stop }}"
+      register: current_state
+
+    - name: Stop running instances before volume swap
+      amazon.aws.ec2_instance:
+        region: "{{ aws_region }}"
+        instance_ids: "{{ instances_to_stop }}"
+        state: stopped
+        wait: true
+      when: current_state.instances | selectattr('state.name', 'equalto', 'running') | list | length > 0
+
+    # ------------------------------------------------------------------
+    # Detach old volumes, create new volumes from snapshots, attach them
+    # ------------------------------------------------------------------
+    - name: Detach old volumes
+      amazon.aws.ec2_vol:
+        region: "{{ aws_region }}"
+        id: "{{ item.old_volume_id }}"
+        instance: None
+      loop: "{{ rollback_plan_enriched }}"
+      loop_control:
+        label: "{{ item.instance_id }}:{{ item.device_name }} detach {{ item.old_volume_id }}"
+
+    - name: Create new volumes from snapshots
+      amazon.aws.ec2_vol:
+        region: "{{ aws_region }}"
+        snapshot: "{{ item.snapshot_id }}"
+        volume_type: "{{ item.volume_type }}"
+        volume_size: "{{ item.volume_size }}"
+        encrypted: "{{ item.encrypted }}"
+        iops: "{{ item.iops if item.iops | int > 0 else omit }}"
+        throughput: "{{ item.throughput if item.throughput | int > 0 else omit }}"
+        zone: "{{ item.availability_zone }}"
+        tags:
+          Name: "{{ item.instance_name }}-{{ item.device_name }}-restored"
+          RestoredFromSnapshot: "{{ item.snapshot_id }}"
+          OriginalVolumeId: "{{ item.old_volume_id }}"
+      loop: "{{ rollback_plan_enriched }}"
+      loop_control:
+        label: "{{ item.instance_id }}:{{ item.device_name }} from {{ item.snapshot_id }}"
+      register: new_volumes
+
+    - name: Attach restored volumes
+      amazon.aws.ec2_vol:
+        region: "{{ aws_region }}"
+        id: "{{ new_volumes.results[idx].volume_id }}"
+        instance: "{{ item.instance_id }}"
+        device_name: "{{ item.device_name }}"
+      loop: "{{ rollback_plan_enriched }}"
+      loop_control:
+        index_var: idx
+        label: "{{ item.instance_id }}:{{ item.device_name }} attach {{ new_volumes.results[idx].volume_id }}"
+
+    # ------------------------------------------------------------------
+    # Start instances back up
+    # ------------------------------------------------------------------
+    - name: Start instances after volume swap
+      amazon.aws.ec2_instance:
+        region: "{{ aws_region }}"
+        instance_ids: "{{ instances_to_stop }}"
+        state: started
+        wait: true
+
+    - name: Rollback summary
+      ansible.builtin.debug:
+        msg: >-
+          Rollback complete for {{ instances_to_stop | length }} instance(s).
+          Old volumes (detached, not deleted):
+          {{ rollback_plan_enriched | map(attribute='old_volume_id') | list }}.
+          New volumes:
+          {{ new_volumes.results | map(attribute='volume_id') | list }}.
+          Verify your instances are healthy before deleting old volumes.

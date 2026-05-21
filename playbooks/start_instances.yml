@@ -1,0 +1,65 @@
+---
+- name: Start EC2 instances by tag
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    aws_region: eu-west-2
+
+  pre_tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - tag_name is defined
+          - tag_value is defined
+        fail_msg: "Required extra vars: -e tag_name=<TagKey> -e tag_value=<TagValue>"
+
+  tasks:
+    - name: Gather instances matching tag {{ tag_name }}={{ tag_value }}
+      amazon.aws.ec2_instance_info:
+        region: "{{ aws_region }}"
+        filters:
+          "tag:{{ tag_name }}": "{{ tag_value }}"
+          instance-state-name:
+            - stopped
+      register: ec2_info
+
+    - name: Report when no stopped instances found
+      ansible.builtin.debug:
+        msg: "No stopped instances found with tag {{ tag_name }}={{ tag_value }}"
+      when: ec2_info.instances | length == 0
+
+    - name: End play when no instances to start
+      ansible.builtin.meta: end_play
+      when: ec2_info.instances | length == 0
+
+    - name: Display instances to be started
+      ansible.builtin.debug:
+        msg: >-
+          Starting {{ ec2_info.instances | length }} instance(s):
+          {{ ec2_info.instances | map(attribute='instance_id') | list }}
+
+    - name: Start instances
+      amazon.aws.ec2_instance:
+        region: "{{ aws_region }}"
+        instance_ids: "{{ ec2_info.instances | map(attribute='instance_id') | list }}"
+        state: started
+        wait: true
+      register: start_result
+
+    - name: Gather updated instance info
+      amazon.aws.ec2_instance_info:
+        region: "{{ aws_region }}"
+        instance_ids: "{{ ec2_info.instances | map(attribute='instance_id') | list }}"
+      register: started_info
+
+    - name: Report started instances
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.instance_id }} is now running
+          (private: {{ item.private_ip_address }},
+          public: {{ item.public_ip_address | default('none') }})
+      loop: "{{ started_info.instances }}"
+      loop_control:
+        label: "{{ item.instance_id }}"

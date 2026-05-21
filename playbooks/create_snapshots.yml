@@ -1,0 +1,93 @@
+---
+- name: Create EBS snapshots for EC2 instances by tag
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    aws_region: eu-west-2
+    snapshot_batch: "{{ lookup('pipe', 'date +%Y%m%d-%H%M%S') }}"
+
+  pre_tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - tag_name is defined
+          - tag_value is defined
+        fail_msg: "Required extra vars: -e tag_name=<TagKey> -e tag_value=<TagValue>"
+
+  tasks:
+    - name: Gather instances matching tag {{ tag_name }}={{ tag_value }}
+      amazon.aws.ec2_instance_info:
+        region: "{{ aws_region }}"
+        filters:
+          "tag:{{ tag_name }}": "{{ tag_value }}"
+          instance-state-name:
+            - running
+            - stopped
+      register: ec2_info
+
+    - name: Report when no instances found
+      ansible.builtin.debug:
+        msg: "No instances found with tag {{ tag_name }}={{ tag_value }}"
+      when: ec2_info.instances | length == 0
+
+    - name: End play when no instances found
+      ansible.builtin.meta: end_play
+      when: ec2_info.instances | length == 0
+
+    - name: Build volume snapshot metadata
+      ansible.builtin.set_fact:
+        snapshot_targets: >-
+          [{% for instance in ec2_info.instances %}
+            {% for vol in instance.block_device_mappings %}
+              {
+                "instance_id": "{{ instance.instance_id }}",
+                "volume_id": "{{ vol.ebs.volume_id }}",
+                "device_name": "{{ vol.device_name }}",
+                "instance_name": "{{ instance.tags.Name | default(instance.instance_id) }}"
+              }{% if not loop.last %},{% endif %}
+            {% endfor %}{% if not loop.last %},{% endif %}
+          {% endfor %}]
+
+    - name: Display volumes to snapshot
+      ansible.builtin.debug:
+        msg: >-
+          Snapshotting {{ snapshot_targets | length }} volume(s)
+          across {{ ec2_info.instances | length }} instance(s),
+          batch {{ snapshot_batch }}
+
+    - name: Create EBS snapshots
+      amazon.aws.ec2_snapshot:
+        region: "{{ aws_region }}"
+        volume_id: "{{ item.volume_id }}"
+        description: >-
+          Snapshot of {{ item.volume_id }} from {{ item.instance_name }}
+          ({{ item.device_name }}) - batch {{ snapshot_batch }}
+        snapshot_tags:
+          Name: "{{ item.instance_name }}-{{ item.device_name }}-{{ snapshot_batch }}"
+          SourceInstanceId: "{{ item.instance_id }}"
+          SourceVolumeId: "{{ item.volume_id }}"
+          SourceDeviceName: "{{ item.device_name }}"
+          SnapshotBatch: "{{ snapshot_batch }}"
+        wait: true
+      loop: "{{ snapshot_targets }}"
+      loop_control:
+        label: "{{ item.instance_id }}:{{ item.device_name }}"
+      register: snapshot_results
+
+    - name: Report created snapshots
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.item.instance_id }} {{ item.item.device_name }}
+          -> snapshot {{ item.snapshot_id }}
+      loop: "{{ snapshot_results.results }}"
+      loop_control:
+        label: "{{ item.snapshot_id }}"
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg: >-
+          Created {{ snapshot_results.results | length }} snapshot(s),
+          batch ID: {{ snapshot_batch }}.
+          Use -e snapshot_batch={{ snapshot_batch }} with rollback_snapshots.yml to restore.

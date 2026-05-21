@@ -1,0 +1,53 @@
+---
+- name: Stop EC2 instances by tag
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    aws_region: eu-west-2
+
+  pre_tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - tag_name is defined
+          - tag_value is defined
+        fail_msg: "Required extra vars: -e tag_name=<TagKey> -e tag_value=<TagValue>"
+
+  tasks:
+    - name: Gather instances matching tag {{ tag_name }}={{ tag_value }}
+      amazon.aws.ec2_instance_info:
+        region: "{{ aws_region }}"
+        filters:
+          "tag:{{ tag_name }}": "{{ tag_value }}"
+          instance-state-name:
+            - running
+      register: ec2_info
+
+    - name: Report when no running instances found
+      ansible.builtin.debug:
+        msg: "No running instances found with tag {{ tag_name }}={{ tag_value }}"
+      when: ec2_info.instances | length == 0
+
+    - name: End play when no instances to stop
+      ansible.builtin.meta: end_play
+      when: ec2_info.instances | length == 0
+
+    - name: Display instances to be stopped
+      ansible.builtin.debug:
+        msg: >-
+          Stopping {{ ec2_info.instances | length }} instance(s):
+          {{ ec2_info.instances | map(attribute='instance_id') | list }}
+
+    - name: Stop instances
+      amazon.aws.ec2_instance:
+        region: "{{ aws_region }}"
+        instance_ids: "{{ ec2_info.instances | map(attribute='instance_id') | list }}"
+        state: stopped
+        wait: true
+      register: stop_result
+
+    - name: Report stopped instances
+      ansible.builtin.debug:
+        msg: "Successfully stopped {{ ec2_info.instances | length }} instance(s)"
