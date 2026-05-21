@@ -19,11 +19,7 @@
     - name: Gather instances matching tag {{ tag_name }}={{ tag_value }}
       amazon.aws.ec2_instance_info:
         region: "{{ aws_region }}"
-        filters:
-          "tag:{{ tag_name }}": "{{ tag_value }}"
-          instance-state-name:
-            - running
-            - stopped
+        filters: "{{ {'tag:' + tag_name: tag_value, 'instance-state-name': ['running', 'stopped']} }}"
       register: ec2_info
 
     - name: Report when no instances found
