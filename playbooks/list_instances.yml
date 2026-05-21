@@ -1,0 +1,34 @@
+---
+- name: List EC2 instances and their tags
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    aws_region: eu-west-2
+
+  tasks:
+    - name: Gather all EC2 instances
+      amazon.aws.ec2_instance_info:
+        region: "{{ aws_region }}"
+        filters: "{{ {'tag:' + tag_name: tag_value} if tag_name is defined and tag_value is defined else omit }}"
+      register: ec2_info
+
+    - name: Report when no instances found
+      ansible.builtin.debug:
+        msg: "No instances found"
+      when: ec2_info.instances | length == 0
+
+    - name: Display instance details
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.tags.Name | default('(no name)') }}
+          | {{ item.instance_id }}
+          | {{ item.instance_type }}
+          | {{ item.state.name }}
+          | {{ item.private_ip_address }}
+          | public: {{ item.public_ip_address | default('none') }}
+          | tags: {{ item.tags }}
+      loop: "{{ ec2_info.instances }}"
+      loop_control:
+        label: "{{ item.instance_id }}"
