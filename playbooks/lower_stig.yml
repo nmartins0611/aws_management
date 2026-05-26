@@ -1,0 +1,256 @@
+---
+# Intentionally lowers the STIG compliance posture of a RHEL 9 system for
+# demonstration purposes. Useful for creating a "before" state that a
+# remediation workflow can then fix.
+#
+# WARNING: This playbook deliberately weakens system security. Use ONLY on
+# disposable lab/demo systems. NEVER run against production.
+#
+# Excluded from changes: SSH daemon configuration and SSH key usage.
+
+- name: Lower STIG compliance for demonstration
+  hosts: vulnerable-hosts
+  become: true
+
+  tasks:
+
+    # --- Password Policy Weakening ---
+
+    - name: Set minimum password length to 4
+      ansible.builtin.lineinfile:
+        path: /etc/security/pwquality.conf
+        regexp: '^minlen\s*='
+        line: "minlen = 4"
+
+    - name: Disable password complexity - uppercase requirement
+      ansible.builtin.lineinfile:
+        path: /etc/security/pwquality.conf
+        regexp: '^ucredit\s*='
+        line: "ucredit = 0"
+
+    - name: Disable password complexity - lowercase requirement
+      ansible.builtin.lineinfile:
+        path: /etc/security/pwquality.conf
+        regexp: '^lcredit\s*='
+        line: "lcredit = 0"
+
+    - name: Disable password complexity - digit requirement
+      ansible.builtin.lineinfile:
+        path: /etc/security/pwquality.conf
+        regexp: '^dcredit\s*='
+        line: "dcredit = 0"
+
+    - name: Disable password complexity - special character requirement
+      ansible.builtin.lineinfile:
+        path: /etc/security/pwquality.conf
+        regexp: '^ocredit\s*='
+        line: "ocredit = 0"
+
+    - name: Remove password history enforcement
+      ansible.builtin.lineinfile:
+        path: /etc/security/pwquality.conf
+        regexp: '^remember\s*='
+        line: "remember = 0"
+
+    - name: Set maximum password age to unlimited (99999 days)
+      ansible.builtin.lineinfile:
+        path: /etc/login.defs
+        regexp: '^PASS_MAX_DAYS'
+        line: "PASS_MAX_DAYS   99999"
+
+    - name: Set minimum password age to 0 days
+      ansible.builtin.lineinfile:
+        path: /etc/login.defs
+        regexp: '^PASS_MIN_DAYS'
+        line: "PASS_MIN_DAYS   0"
+
+    - name: Set minimum password length in login.defs to 4
+      ansible.builtin.lineinfile:
+        path: /etc/login.defs
+        regexp: '^PASS_MIN_LEN'
+        line: "PASS_MIN_LEN    4"
+
+    # --- Audit Configuration Weakening ---
+
+    - name: Stop and disable auditd
+      ansible.builtin.systemd:
+        name: auditd
+        state: stopped
+        enabled: false
+
+    - name: Remove audit rules
+      ansible.builtin.copy:
+        content: ""
+        dest: /etc/audit/rules.d/audit.rules
+        mode: "0640"
+
+    # --- Filesystem and Mount Weakening ---
+
+    - name: Disable AIDE intrusion detection (remove cron job if present)
+      ansible.builtin.file:
+        path: /etc/cron.daily/aide
+        state: absent
+
+    - name: Remove AIDE database
+      ansible.builtin.file:
+        path: /var/lib/aide/aide.db.gz
+        state: absent
+
+    # --- SELinux Weakening ---
+
+    - name: Set SELinux to permissive mode
+      ansible.posix.selinux:
+        policy: targeted
+        state: permissive
+
+    # --- Firewall Weakening ---
+
+    - name: Stop and disable firewalld
+      ansible.builtin.systemd:
+        name: firewalld
+        state: stopped
+        enabled: false
+
+    # --- Account Lockout Weakening ---
+
+    - name: Disable account lockout in faillock
+      ansible.builtin.lineinfile:
+        path: /etc/security/faillock.conf
+        regexp: '^deny\s*='
+        line: "deny = 0"
+
+    - name: Remove lockout time restriction
+      ansible.builtin.lineinfile:
+        path: /etc/security/faillock.conf
+        regexp: '^unlock_time\s*='
+        line: "unlock_time = 0"
+
+    # --- Crypto Policy Weakening ---
+
+    - name: Set system-wide crypto policy to LEGACY
+      ansible.builtin.command:
+        cmd: update-crypto-policies --set LEGACY
+      changed_when: true
+
+    # --- Session Timeout Weakening ---
+
+    - name: Remove TMOUT enforcement from profile
+      ansible.builtin.lineinfile:
+        path: /etc/profile.d/tmout.sh
+        create: true
+        mode: "0644"
+        regexp: '^TMOUT='
+        line: "TMOUT=0"
+
+    - name: Export TMOUT=0 in profile
+      ansible.builtin.lineinfile:
+        path: /etc/profile.d/tmout.sh
+        regexp: '^export TMOUT'
+        line: "export TMOUT"
+
+    # --- Kernel Security Weakening ---
+
+    - name: Disable kernel address space layout randomization
+      ansible.posix.sysctl:
+        name: kernel.randomize_va_space
+        value: "0"
+        state: present
+        sysctl_set: true
+
+    - name: Allow core dumps
+      ansible.posix.sysctl:
+        name: fs.suid_dumpable
+        value: "2"
+        state: present
+        sysctl_set: true
+
+    - name: Enable IP forwarding (non-router violation)
+      ansible.posix.sysctl:
+        name: net.ipv4.ip_forward
+        value: "1"
+        state: present
+        sysctl_set: true
+
+    - name: Disable TCP SYN cookies
+      ansible.posix.sysctl:
+        name: net.ipv4.tcp_syncookies
+        value: "0"
+        state: present
+        sysctl_set: true
+
+    - name: Accept ICMP redirects
+      ansible.posix.sysctl:
+        name: net.ipv4.conf.all.accept_redirects
+        value: "1"
+        state: present
+        sysctl_set: true
+
+    - name: Accept source-routed packets
+      ansible.posix.sysctl:
+        name: net.ipv4.conf.all.accept_source_route
+        value: "1"
+        state: present
+        sysctl_set: true
+
+    # --- Banner and MOTD Weakening ---
+
+    - name: Remove login banner
+      ansible.builtin.copy:
+        content: ""
+        dest: /etc/issue
+        mode: "0644"
+
+    - name: Remove network login banner
+      ansible.builtin.copy:
+        content: ""
+        dest: /etc/issue.net
+        mode: "0644"
+
+    # --- Permissions Weakening ---
+
+    - name: Set world-readable permissions on /etc/shadow
+      ansible.builtin.file:
+        path: /etc/shadow
+        mode: "0644"
+
+    - name: Set overly permissive umask in login.defs
+      ansible.builtin.lineinfile:
+        path: /etc/login.defs
+        regexp: '^UMASK'
+        line: "UMASK           000"
+
+    # --- Unnecessary Services ---
+
+    - name: Install and enable rpcbind (unnecessary service)
+      ansible.builtin.dnf:
+        name: rpcbind
+        state: present
+
+    - name: Start and enable rpcbind
+      ansible.builtin.systemd:
+        name: rpcbind
+        state: started
+        enabled: true
+
+    # --- USB Storage (physical access vector) ---
+
+    - name: Ensure USB storage kernel module is loadable
+      ansible.builtin.lineinfile:
+        path: /etc/modprobe.d/blacklist.conf
+        create: true
+        mode: "0644"
+        regexp: '^install usb-storage'
+        state: absent
+
+    # --- Ctrl+Alt+Del Reboot ---
+
+    - name: Enable Ctrl+Alt+Del reboot
+      ansible.builtin.systemd:
+        name: ctrl-alt-del.target
+        masked: false
+
+    - name: Create Ctrl+Alt+Del symlink
+      ansible.builtin.file:
+        src: /usr/lib/systemd/system/reboot.target
+        dest: /etc/systemd/system/ctrl-alt-del.target
+        state: link
