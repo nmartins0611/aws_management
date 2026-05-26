@@ -70,31 +70,6 @@
         regexp: '^PASS_MIN_LEN'
         line: "PASS_MIN_LEN    4"
 
-    # --- Audit Configuration Weakening ---
-
-    - name: Stop and disable auditd
-      ansible.builtin.systemd:
-        name: auditd
-        state: stopped
-        enabled: false
-
-    - name: Remove audit rules
-      ansible.builtin.copy:
-        content: ""
-        dest: /etc/audit/rules.d/audit.rules
-        mode: "0640"
-
-    # --- Filesystem and Mount Weakening ---
-
-    # - name: Disable AIDE intrusion detection (remove cron job if present)
-    #   ansible.builtin.file:
-    #     path: /etc/cron.daily/aide
-    #     state: absent
-
-    # - name: Remove AIDE database
-    #   ansible.builtin.file:
-    #     path: /var/lib/aide/aide.db.gz
-    #     state: absent
 
     # --- SELinux Weakening ---
 
