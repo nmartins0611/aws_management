@@ -86,15 +86,15 @@
 
     # --- Filesystem and Mount Weakening ---
 
-    - name: Disable AIDE intrusion detection (remove cron job if present)
-      ansible.builtin.file:
-        path: /etc/cron.daily/aide
-        state: absent
+    # - name: Disable AIDE intrusion detection (remove cron job if present)
+    #   ansible.builtin.file:
+    #     path: /etc/cron.daily/aide
+    #     state: absent
 
-    - name: Remove AIDE database
-      ansible.builtin.file:
-        path: /var/lib/aide/aide.db.gz
-        state: absent
+    # - name: Remove AIDE database
+    #   ansible.builtin.file:
+    #     path: /var/lib/aide/aide.db.gz
+    #     state: absent
 
     # --- SELinux Weakening ---
 
